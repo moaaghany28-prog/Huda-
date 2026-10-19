@@ -1,0 +1,130 @@
+
+
+  name: Build Huda APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Prepare web files (bundle Tailwind for offline use)
+        run: |
+          mkdir -p app/www
+          cp index.html app/www/index.html
+          curl -fsSL https://cdn.tailwindcss.com/3.4.17 -o app/www/tailwind.js
+          sed -i 's|https://cdn.tailwindcss.com|tailwind.js|' app/www/index.html
+
+      - name: Bundle Arabic fonts for offline use
+        continue-on-error: true
+        run: |
+          cd app/www
+          python3 - <<'PY'
+          import re, urllib.request, os
+          css_url = "https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Cairo:wght@400;600;700;800&display=swap"
+          req = urllib.request.Request(css_url, headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13) Chrome/120 Mobile Safari/537.36"})
+          css = urllib.request.urlopen(req).read().decode()
+          os.makedirs("fonts", exist_ok=True)
+          def grab(m):
+              url = m.group(1)
+              name = re.sub(r"[^A-Za-z0-9_.-]", "_", url.split("/")[-1])
+              urllib.request.urlretrieve(url, "fonts/" + name)
+              return "url(fonts/" + name + ")"
+          css = re.sub(r"url\((https://fonts\.gstatic\.com/[^)]+)\)", grab, css)
+          open("fonts.css", "w").write(css)
+          html = open("index.html", encoding="utf-8").read()
+          html = re.sub(r'<link href="https://fonts\.googleapis\.com/css2[^>]*>', '<link href="fonts.css" rel="stylesheet">', html)
+          open("index.html", "w", encoding="utf-8").write(html)
+          print("fonts bundled")
+          PY
+
+      - name: Create Capacitor project
+        run: |
+          cd app
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/local-notifications@6 @capacitor/geolocation@6
+          cat > capacitor.config.json <<'JSON'
+          {
+            "appId": "com.huda.app",
+            "appName": "هُدَى",
+            "webDir": "www",
+            "server": { "androidScheme": "https" }
+          }
+          JSON
+          npx cap add android
+
+      - name: Android manifest permissions
+        run: |
+          M=app/android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <application|' $M
+          grep -n "uses-permission" $M
+
+      - name: App icon
+        run: |
+          pip install pillow
+          python3 - <<'PY'
+          from PIL import Image
+          import os
+          src = Image.open("icon.png").convert("RGBA")
+          base = "app/android/app/src/main/res"
+          legacy = {"mdpi":48,"hdpi":72,"xhdpi":96,"xxhdpi":144,"xxxhdpi":192}
+          fore = {"mdpi":108,"hdpi":162,"xhdpi":216,"xxhdpi":324,"xxxhdpi":432}
+          for d in legacy:
+              p = f"{base}/mipmap-{d}"
+              os.makedirs(p, exist_ok=True)
+              src.resize((legacy[d],)*2, Image.LANCZOS).save(f"{p}/ic_launcher.png")
+              src.resize((legacy[d],)*2, Image.LANCZOS).save(f"{p}/ic_launcher_round.png")
+              src.resize((fore[d],)*2, Image.LANCZOS).save(f"{p}/ic_launcher_foreground.png")
+          PY
+
+      - name: Notification sounds (optional audio files in repo root)
+        run: |
+          RAW=app/android/app/src/main/res/raw
+          mkdir -p $RAW
+          echo "{" > app/www/sounds.json
+          first=1
+          for f in *.mp3 *.wav *.ogg *.MP3 *.WAV *.OGG; do
+            [ -f "$f" ] || continue
+            n=$(echo "$f" | tr 'A-Z' 'a-z' | tr '-' '_' | tr ' ' '_')
+            base="${n%.*}"
+            cp "$f" "$RAW/$n"
+            [ $first -eq 0 ] && echo "," >> app/www/sounds.json
+            printf '"%s":"%s"' "$base" "$n" >> app/www/sounds.json
+            first=0
+          done
+          echo "}" >> app/www/sounds.json
+          cat app/www/sounds.json
+          ls -la $RAW
+
+      - name: Sync and build APK
+        run: |
+          cd app
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: huda-apk
+          path: app/android/app/build/outputs/apk/debug/app-debug.apkfication sounds (optional audio files in repo root)
+        run: |
+          RAW=app/android/app/src/main/res/raw
+          mkdir -p $RAW
+          echo "{" > app/www/sounds.json
+          first=1
+          for f in *
